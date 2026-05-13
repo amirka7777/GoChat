@@ -1,8 +1,6 @@
 GoChat.log
 
 bin/
-server
-client
 
 config.conf
 .vscode/
