@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -12,11 +13,89 @@ import (
 
 var clients = make( map[net.Conn]string )
 var mutexForClients sync.RWMutex
+var clientRoom = make( map[net.Conn]*Room )
+var mutexForClientRoom sync.RWMutex
+
 var logFile *os.File
 
 type Config struct {
 	Port string
 	Log_level string
+}
+
+type Room struct {
+	Name string
+	Password string
+	Clients map[net.Conn]string
+	mu sync.RWMutex
+}
+
+var rooms = make(map[string]*Room)
+var mutexForRooms sync.RWMutex
+
+func CreateRoom(name, password string) *Room {
+
+	room := &Room{
+		Name: name,
+		Password: password,
+		Clients: make(map[net.Conn]string),
+	}
+
+	mutexForRooms.Lock()
+	rooms[name] = room
+	mutexForRooms.Unlock()
+
+	LogInfo("Создана комната: " + name + " (пароль: " + strconv.FormatBool(RoomHavePassword(room.Password)) +  ")")
+	return room
+
+
+}
+
+func RoomHavePassword(s string) bool {
+	return s != ""
+}
+
+func (r *Room) AddClient(conn net.Conn, name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Clients[conn] = name
+}
+
+func (r *Room) RemoveClient(conn net.Conn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.Clients, conn)
+}
+
+func (r *Room) sendMessageForRoom(sender net.Conn, msg string) {
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	for conn := range r.Clients {
+		if conn != sender {
+			conn.Write([]byte(msg + "\n"))
+		}
+	}
+
+}
+
+func (r *Room) CheckCountPeople() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.Clients)
+}
+
+func (r *Room) HavePassword() bool {
+	return r.Password != ""
+}
+
+func (r *Room) CheckPassword(password string) bool {
+	if r.Password == "" {
+		return true
+	}
+
+	return r.Password == password
 }
 
 func loadConfig() *Config {
@@ -74,6 +153,8 @@ func main() {
 	defer logFile.Close()
 
 	config := loadConfig()
+	CreateRoom("lobby", "")
+	LogInfo("Создана общая комната 'lobby'")
 
 	LogInfo("Сервер запущен на порту " + config.Port)
 
@@ -107,16 +188,27 @@ func handleConnection(conn net.Conn) {
 	if !scanner.Scan() {
 		return
 	}
-	name := scanner.Text() 
+	name := scanner.Text()
 
 	mutexForClients.Lock()
 	clients[conn] = name
 	mutexForClients.Unlock()
 
+	lobby := rooms["lobby"]
+	if lobby == nil {
+		LogError("Комната lobby не найдена!")
+		return 
+	}
+	lobby.AddClient(conn, name)
+
+	mutexForClientRoom.Lock()
+	clientRoom[conn] = lobby
+	mutexForClientRoom.Unlock()
+
 	LogInfo("Клиент представился: " + name)
 	conn.Write([]byte("Добро пожаловать в GoChat, " + name + "!\n"))
 
-	sendMessageForClients("✋ " + name + " присоединился к чату!", conn)
+	lobby.sendMessageForRoom(conn, "✋ " + name + " присоединился к чату!")
 
 	for scanner.Scan() {
 		userMessage := scanner.Text()
@@ -126,16 +218,39 @@ func handleConnection(conn net.Conn) {
 			continue
 		}
 
-		LogInfo("[" + name + "]: " + userMessage)
-		sendMessageForClients("✉ " + "[" + name + "]" + ": " + userMessage, conn)
+		if len(userMessage) > 0 && userMessage[0] == '/' {
+			handleCommand(conn, name, userMessage)
+		} else {
+			
+			mutexForClientRoom.RLock()
+			currentRoom := clientRoom[conn]
+			mutexForClientRoom.RUnlock()
 
+			if currentRoom != nil {
+				LogInfo("[" + name + " -> " + currentRoom.Name + "]: " + userMessage)
+				currentRoom.sendMessageForRoom(conn, "✉ ["+name+"]: "+ userMessage)
+			}
+
+		}
+
+	}
+
+	mutexForClientRoom.RLock()
+	currentRoom := clientRoom[conn]
+	mutexForClientRoom.RUnlock()
+
+	if currentRoom != nil {
+		currentRoom.RemoveClient(conn)
+		currentRoom.sendMessageForRoom(conn, "❗ " + "[" + name + "]" + " покинул чат!")
 	}
 
 	mutexForClients.Lock()
 	delete(clients, conn)
 	mutexForClients.Unlock()
 
-	sendMessageForClients("❗ " + "[" + name + "]" + " покинул чат!", conn)	
+	mutexForClientRoom.Lock()
+	delete(clientRoom, conn) 
+	mutexForClientRoom.Unlock()
 
 
 	LogInfo("Клиент отключился: " + name)
@@ -143,17 +258,184 @@ func handleConnection(conn net.Conn) {
 
 }
 
+func handleCommand(conn net.Conn, name, fullCommand string) {
 
-func sendMessageForClients(message string, sender net.Conn) {
+	parts := splitCommand(fullCommand)
+	if len(parts) == 0 {
+		return
+	}
 
-	mutexForClients.RLock()
-	defer mutexForClients.RUnlock()
+	command := parts[0]
+	argumets := parts[1:]
 
-	for conn := range clients {
-		if conn != sender {
-			conn.Write([]byte(message + "\n"))
+	switch command {
+	case "/create":
+		if len(argumets) < 1 {
+			conn.Write([]byte("❌ Использование: /create <название> [пароль]\n"))
+			return
+		}
+
+		roomName := argumets[0]
+		password := ""
+		if len(argumets) >= 2 {
+			password = argumets[1]
+		}
+
+		mutexForRooms.RLock()
+		_, existsRoom := rooms[roomName]
+		mutexForRooms.RUnlock()
+
+		if existsRoom != false {
+			conn.Write([]byte("❌ Комната " + roomName + " уже существует!\n"))
+			return
+		}
+
+		CreateRoom(roomName, password)
+		conn.Write([]byte("✅ Комната " + roomName + " успешно создана!"))
+	case "/join":
+		if len(argumets) < 1 {
+			conn.Write([]byte("❌ Использование: /join <название> [пароль]\n"))
+			return
+		}
+
+		roomName := argumets[0]
+		password := ""
+		if len(argumets) >= 2 {
+			password = argumets[1]
+		}
+
+		mutexForRooms.RLock()
+		checkRoom, existsRoom := rooms[roomName]
+		mutexForRooms.RUnlock()
+
+		if existsRoom == false {
+			conn.Write([]byte("❌ Комната " + roomName + " не существует!\n"))
+			return 
+		}
+
+		if !checkRoom.CheckPassword(password) {
+			conn.Write([]byte("❌ Неверный пароль для комнаты " + roomName + "\n"))
+			LogWarning("Неудачная попытка входа в комнату " + roomName + " от пользователя " + name)
+			return 
+		}
+
+		mutexForClientRoom.RLock()
+		oldRoom := clientRoom[conn]
+		mutexForClientRoom.RUnlock()
+
+		if oldRoom != nil && oldRoom.Name == roomName {
+			conn.Write([]byte("❌ Вы уже в данной комнате!\n"))
+			return
+		}
+
+		if oldRoom != nil {
+			oldRoom.RemoveClient(conn)
+			oldRoom.sendMessageForRoom(conn, "❗ [" + name + "] покинул комнату " + oldRoom.Name)
+		}
+
+		checkRoom.AddClient(conn, name)
+
+		mutexForClientRoom.Lock()
+		clientRoom[conn] = checkRoom
+		mutexForClientRoom.Unlock()
+
+		conn.Write([]byte("✅ Вы успешно вошли в комнату " + roomName + "\n"))
+		checkRoom.sendMessageForRoom(conn, "✋ " + name + " присоединился к комнате!")
+		if oldRoom != nil {
+    		LogInfo("[" + name + "]: перешел из комнаты " + oldRoom.Name + " в " + checkRoom.Name)
+		} else {
+    		LogInfo("[" + name + "]: вошел в комнату " + checkRoom.Name)
+		}
+	
+	case "/leave":
+
+		mutexForClientRoom.RLock()
+		currentRoom := clientRoom[conn]
+		mutexForClientRoom.RUnlock()
+
+		if currentRoom == nil {
+    		conn.Write([]byte("❌ Ошибка: вы не находитесь в комнате\n"))
+    		return
+		}
+
+		if currentRoom.Name == "lobby" {
+			conn.Write([]byte("❌ Вы не можете выйти из комнаты 'lobby'\n"))
+			return
+		}
+
+		lobby := rooms["lobby"]
+		currentRoom.RemoveClient(conn)
+		currentRoom.sendMessageForRoom(conn, "❗ [" + name + "] покинул комнату " + currentRoom.Name)
+
+		lobby.AddClient(conn, name)
+
+		mutexForClientRoom.Lock()
+		clientRoom[conn] = lobby
+		mutexForClientRoom.Unlock()
+
+		conn.Write([]byte("✅ Вы успешно вернулись в комнату lobby!\n"))
+		lobby.sendMessageForRoom(conn, "✋ " + name + " вернулся в общий чат!")
+	case "/rooms":
+		mutexForRooms.RLock()
+		defer mutexForRooms.RUnlock()
+
+		if len(rooms) == 0 {
+			conn.Write([]byte("❌ нет доступных комнат!\n"))
+			return
+		}
+
+		totalRooms := ""
+		count := 0
+		for _, room := range rooms {
+			count++
+			lock := "🔓"
+			if room.HavePassword() {
+				lock = "🔒"
+			} 
+			totalRooms += fmt.Sprintf("   %d) %s %s (%d человек)\n", count, lock, room.Name, room.CheckCountPeople())
+		}
+		conn.Write([]byte(totalRooms))
+	
+	case "/help":
+		result := ""
+		trueCommand := []string{
+			"/create <название> [пароль] - создать комнату",
+			"/join <название> [пароль] - присоединиться к комнате",
+			"/leave - покинуть текущую комнату",
+			"/rooms - вывод списка доступных команд"}
+		
+		for _, val := range trueCommand {
+			result += fmt.Sprintf(val + "\n")
+		}
+
+		conn.Write([]byte(result))
+
+	default:
+		conn.Write([]byte("❌ неизвестная команда! (вызовите /help для вывода списка доступных команд)\n"))
+	}
+	
+}
+
+func splitCommand(s string) []string {
+
+	var parts []string
+	current := ""
+
+	for i := 0; i < len(s); i++ {
+		if s[i] == ' ' {
+			if current != "" {
+				parts = append(parts, current)
+				current = ""
+			}
+		} else {
+			current += string(s[i])
 		}
 	}
+	if current != "" {
+		parts = append(parts, current)
+	}
+
+	return parts
 
 }
 
