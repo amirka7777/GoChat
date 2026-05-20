@@ -9,14 +9,12 @@ import (
 
 type Config struct {
 	Port string
-	Log_level string
 }
 
 func loadConfig() *Config {
 
 	config_default := &Config{
 		Port: "8080",
-		Log_level: "info",
 	}
 
 	file, err := os.Open("../../config.conf")
@@ -41,8 +39,6 @@ func loadConfig() *Config {
 				switch key {
 				case "PORT":
 					config_default.Port = value
-				case "LOG_LEVEL":
-					config_default.Log_level = value
 				}
 				break
 			}
@@ -60,6 +56,7 @@ func main() {
 	}
 
 	config := loadConfig()
+
 
 	name := os.Args[1]
 

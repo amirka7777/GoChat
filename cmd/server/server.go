@@ -23,7 +23,6 @@ type Config struct {
 	Port string
 	InactivityTimer int
 	MaxUserInRoom int
-	MaxMessageInSecond int
 }
 
 type Room struct {
@@ -58,10 +57,15 @@ func RoomHavePassword(s string) bool {
 	return s != ""
 }
 
-func (r *Room) AddClient(conn net.Conn, name string) {
+func (r *Room) AddClient(conn net.Conn, name string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(r.Clients) >= globalConfig.MaxUserInRoom {
+		return false
+	}
+
 	r.Clients[conn] = name
+	return true
 }
 
 func (r *Room) RemoveClient(conn net.Conn) {
@@ -89,6 +93,12 @@ func (r *Room) CheckCountPeople() int {
 	return len(r.Clients)
 }
 
+func (r *Room) isFull() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.Clients) >= globalConfig.MaxUserInRoom
+}
+
 func (r *Room) HavePassword() bool {
 	return r.Password != ""
 }
@@ -107,7 +117,6 @@ func loadConfig() *Config {
 		Port: "8080",
 		InactivityTimer: 300,
 		MaxUserInRoom: 20,
-		MaxMessageInSecond: 5,
 	}
 
 	file, err := os.Open("../../config.conf")
@@ -147,13 +156,6 @@ func loadConfig() *Config {
 						config_default.MaxUserInRoom = maxUsers
 						LogInfo("Максимальное количество людей прочитано из конфига: " + value)
 					}
-		
-				case "MAX_MESSAGES_IN_SECOND":
-					maxMessage, _ := strconv.Atoi(value)
-					if maxMessage > 0 {
-						config_default.MaxMessageInSecond = maxMessage
-						LogInfo("Ограничение на кол-во сообщений в секунду прочитано из конфига: " + value)
-					}	
 				}
 			
 				break
@@ -236,7 +238,12 @@ func handleConnection(conn net.Conn) {
 		LogError("Комната lobby не найдена!")
 		return 
 	}
-	lobby.AddClient(conn, name)
+
+	if !lobby.AddClient(conn, name) {
+		LogError("Не удалось добавить клиента в lobby: комната переполнена")
+		conn.Write([]byte("Комната lobby переполнена! Максимум: " + strconv.Itoa(globalConfig.MaxUserInRoom) + " человек!\n"))
+		return
+	}
 
 	mutexForClientRoom.Lock()
 	clientRoom[conn] = lobby
@@ -244,6 +251,7 @@ func handleConnection(conn net.Conn) {
 
 	LogInfo("Клиент представился: " + name)
 	conn.Write([]byte("Добро пожаловать в GoChat, " + name + "!\n"))
+	conn.Write([]byte("Ваше текущее положение - общая комната lobby!\n"))
 
 	lobby.sendMessageForRoom(conn, "✋ " + name + " присоединился к чату!")
 
@@ -357,6 +365,12 @@ func handleCommand(conn net.Conn, name, fullCommand string) {
 			return 
 		}
 
+		if checkRoom.isFull() {
+			conn.Write([]byte("Комната " + roomName + " переполнена! Максимум: " + strconv.Itoa(globalConfig.MaxUserInRoom) + " человек!\n"))
+			LogWarning("Неудачная попытка входа в комнату " + roomName + " от пользователя " + name)
+			return 
+		}
+
 		if !checkRoom.CheckPassword(password) {
 			conn.Write([]byte("❌ Неверный пароль для комнаты " + roomName + "\n"))
 			LogWarning("Неудачная попытка входа в комнату " + roomName + " от пользователя " + name)
@@ -436,7 +450,7 @@ func handleCommand(conn net.Conn, name, fullCommand string) {
 			if room.HavePassword() {
 				lock = "🔒"
 			} 
-			totalRooms += fmt.Sprintf("   %d) %s %s (%d человек)\n", count, lock, room.Name, room.CheckCountPeople())
+			totalRooms += fmt.Sprintf("   %d) %s %s (%d/%d человек)\n", count, lock, room.Name, room.CheckCountPeople(), globalConfig.MaxUserInRoom)
 		}
 		conn.Write([]byte(totalRooms))
 	
