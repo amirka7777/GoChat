@@ -291,7 +291,7 @@ func handleCommand(conn net.Conn, name, fullCommand string) {
 		}
 
 		CreateRoom(roomName, password)
-		conn.Write([]byte("✅ Комната " + roomName + " успешно создана!"))
+		conn.Write([]byte("✅ Комната " + roomName + " успешно создана!\n"))
 	case "/join":
 		if len(argumets) < 1 {
 			conn.Write([]byte("❌ Использование: /join <название> [пароль]\n"))
