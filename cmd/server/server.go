@@ -15,12 +15,15 @@ var clients = make( map[net.Conn]string )
 var mutexForClients sync.RWMutex
 var clientRoom = make( map[net.Conn]*Room )
 var mutexForClientRoom sync.RWMutex
+var globalConfig *Config
 
 var logFile *os.File
 
 type Config struct {
 	Port string
-	Log_level string
+	InactivityTimer int
+	MaxUserInRoom int
+	MaxMessageInSecond int
 }
 
 type Room struct {
@@ -102,7 +105,9 @@ func loadConfig() *Config {
 
 	config_default := &Config{
 		Port: "8080",
-		Log_level: "info",
+		InactivityTimer: 300,
+		MaxUserInRoom: 20,
+		MaxMessageInSecond: 5,
 	}
 
 	file, err := os.Open("../../config.conf")
@@ -129,10 +134,28 @@ func loadConfig() *Config {
 				case "PORT":
 					config_default.Port = value
 					LogInfo("Порт прочитан из конфига: " + value)
-				case "LOG_LEVEL":
-					config_default.Log_level = value
-					LogInfo("Уровень логирования прочитан из конфига: " + value)
+				case "INACTIVITY_TIMER":
+					time_inactivity, _ := strconv.Atoi(value)
+					if time_inactivity > 0 {
+						config_default.InactivityTimer = time_inactivity
+						LogInfo("Время бездействия прочитано из конфига: " + value)
+					}
+
+				case "MAX_USERS_IN_ROOM":
+					maxUsers, _ := strconv.Atoi(value)
+					if maxUsers > 0 {
+						config_default.MaxUserInRoom = maxUsers
+						LogInfo("Максимальное количество людей прочитано из конфига: " + value)
+					}
+		
+				case "MAX_MESSAGES_IN_SECOND":
+					maxMessage, _ := strconv.Atoi(value)
+					if maxMessage > 0 {
+						config_default.MaxMessageInSecond = maxMessage
+						LogInfo("Ограничение на кол-во сообщений в секунду прочитано из конфига: " + value)
+					}	
 				}
+			
 				break
 			}
 		}
@@ -152,13 +175,15 @@ func main() {
 	}
 	defer logFile.Close()
 
-	config := loadConfig()
+	
+	globalConfig = loadConfig()
+
 	CreateRoom("lobby", "")
 	LogInfo("Создана общая комната 'lobby'")
 
-	LogInfo("Сервер запущен на порту " + config.Port)
+	LogInfo("Сервер запущен на порту " + globalConfig.Port)
 
-	listener, err := net.Listen("tcp", ":"+config.Port)
+	listener, err := net.Listen("tcp", ":"+globalConfig.Port)
 	if err != nil {
 		LogError("Ошибка при запуске: " + err.Error())
 		os.Exit(1)
@@ -188,7 +213,19 @@ func handleConnection(conn net.Conn) {
 	if !scanner.Scan() {
 		return
 	}
+
 	name := scanner.Text()
+
+	var idleTimer *time.Timer
+	if globalConfig.InactivityTimer > 0 {
+		idleTimer = time.NewTimer(time.Duration(globalConfig.InactivityTimer) * time.Second)
+		go func () {
+			<- idleTimer.C
+			LogWarning("Пользователь " + name + " отключен за бездействие!")
+			conn.Write([]byte("Вы отключены за бездействие!\n"))
+			conn.Close()
+		}()
+	}
 
 	mutexForClients.Lock()
 	clients[conn] = name
@@ -213,6 +250,10 @@ func handleConnection(conn net.Conn) {
 	for scanner.Scan() {
 		userMessage := scanner.Text()
 
+		if idleTimer != nil {
+			idleTimer.Reset(time.Duration(globalConfig.InactivityTimer) * time.Second)
+		}
+
 		if userMessage == "" {
 			LogWarning("[" + name + "] отправил пустое сообщение")
 			continue
@@ -233,6 +274,9 @@ func handleConnection(conn net.Conn) {
 
 		}
 
+	}
+	if idleTimer != nil {
+		idleTimer.Stop()
 	}
 
 	mutexForClientRoom.RLock()
