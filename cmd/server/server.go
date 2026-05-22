@@ -463,7 +463,7 @@ func handleCommand(conn net.Conn, name, fullCommand string) {
 			"/rooms - вывод списка доступных команд"}
 		
 		for _, val := range trueCommand {
-			result += fmt.Sprintf(val + "\n")
+			result += fmt.Sprintf("%s\n", val)
 		}
 
 		conn.Write([]byte(result))
