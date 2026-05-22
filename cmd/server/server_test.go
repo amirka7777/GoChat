@@ -82,6 +82,7 @@ func TestRemoveClient(t *testing.T) {
 
 	testRoom := CreateRoom("testRoom", "")
 	testClient, _ := net.Pipe()
+	defer testClient.Close()
 	testRoom.AddClient(testClient, "client1")
 	
 	assert.Equal(t, 1, testRoom.CheckCountPeople(), "кол-во клиентов в комнате должно быть = 1")
