@@ -460,7 +460,8 @@ func handleCommand(conn net.Conn, name, fullCommand string) {
 			"/create <название> [пароль] - создать комнату",
 			"/join <название> [пароль] - присоединиться к комнате",
 			"/leave - покинуть текущую комнату",
-			"/rooms - вывод списка доступных команд"}
+			"/rooms - вывод списка доступных команд",
+			"/exit - покинуть чат"}
 		
 		for _, val := range trueCommand {
 			result += fmt.Sprintf("%s\n", val)
