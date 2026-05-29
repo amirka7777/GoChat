@@ -74,7 +74,11 @@ func main() {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		userText := scanner.Text()
-		conn.Write([]byte(userText + "\n"))
+		_, err := conn.Write([]byte(userText + "\n"))
+		if err != nil {
+			fmt.Println("Соединение с сервером потеряно!")
+			break
+		}
 		if userText == "/exit" {
 			break
 		}
